@@ -1,0 +1,104 @@
+--- org/NumberText/__init__.py	2012-12-06 13:29:27.000000000 +0200
++++ org/NumberText/__init__.py.new	2016-05-19 00:55:57.496854400 +0300
+@@ -9,6 +9,7 @@
+ from org.Numbertext.locales import locales
+ from org.Numbertext.places import places
+ 
++
+ # constant
+ MINUS = "[-\u2212]"  # ASCII hyphen/minus or Unicode minus sign
+ 
+@@ -17,6 +18,37 @@
+ patterns = {}
+ 
+ 
++def _cache_clear():
++    global patterns
++    for mod in patterns.keys():
++        if mod in patterns:
++            conv = patterns[mod]
++            with conv.lock:
++                conv.cache.expire()
++    Timer(60, _clear_cache).start()
++
++def _cache_setup():
++    class Dummy():
++        def dummy(self, d):
++            return d
++    try:
++        from threading import Timer, RLock
++        from cachetools import TTLCache, cached
++
++        d = Dummy()
++        d.lock = RLock()
++        d.cache = TTLCache(maxsize=10, ttl=10)
++        d.dummy = cached(cache=d.cache, lock=d.lock)(d.dummy)
++        d.dummy('test')
++        if ('test',) in d.cache:
++            _cache_clear()
++            return True
++    except:
++        return False
++
++CACHED = _cache_setup()
++
++
+ class NUMBERTEXT( unohelper.Base, XNumberText):
+ 
+         def __init__(self, ctx):
+@@ -72,9 +104,20 @@
+                                 d = __import__("numbertext_" + module)
+                         except:
+                                 return "Error: missing language data (" + module + ")"
+-                        patterns[module] = Soros.compile(d.__doc__)
++                        patterns[module] = self._get_converter(d)
+                 return module
+ 
++
++        def _get_converter(self, mod):
++            global CACHED
++            conv = Soros.compile(mod.__doc__)
++            if CACHED:
++                conv.lock = RLock()
++                conv.cache = TTLCache(maxsize=10**5, ttl=60)
++                conv._run = cached(cache=conv.cache, lock=conv.lock)(conv._run)
++            return conv
++                         
++
+         def getCurrency(self, locale):
+                 allcurr = self.LocaleData.getAllCurrencies(locale)
+                 if allcurr != None:
+@@ -87,7 +130,6 @@
+         # XNumberText method implementations
+         def moneytext(self, prop, num, curr, loc):
+                 global patterns
+-                num = num.strip()
+                 # query document language
+                 locale = self.queryLocale(prop, loc)
+                 mod = self.getModule(locale.Language, locale.Country, locale.Variant)
+@@ -100,13 +142,20 @@
+                         outcurr = curr + " "
+                         if curr in places:
+                                 decimalplaces = places[curr]
+-                if num.rfind(".") > -1 or num.rfind(",") > -1:
+-                        num = float(num.replace(",","."))
+-                        if (type(decimalplaces) == type(0.1)):
+-                                pl = 10**decimalplaces;
++
++                num = num.strip() 
++                if ('.' in num or ',' in num):
++                        num = float(num.replace(",", "."))
++                        if isinstance(decimalplaces, float):
++                                # XXX: esoteric cases with subunits not in base-10
++                                # (should convert to rational/fractional numbers)   
++                                pl = round(10**decimalplaces)
+                                 num = str(round(num * pl) / pl)
+                         else:
+-                                num = str(self.func.callFunction("round", (num, decimalplaces)))
++                                # XXX: float precision limits
++                                num = self.func.callFunction("round", (num, decimalplaces))
++                                # append zero if missing: 12.1 -> 12.10
++                                num = format(num, '.2f')
+                 return get_numbertext(outcurr + num, patterns[mod])
+ 
+         def numbertext(self, prop, num, loc):
